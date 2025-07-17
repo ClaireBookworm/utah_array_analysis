@@ -1,0 +1,7 @@
+data/*
+*.ns6
+*.nsx
+*/csv
+__pycache__
+*.pyc
+bci/*
