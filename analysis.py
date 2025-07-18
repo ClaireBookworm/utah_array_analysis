@@ -151,6 +151,17 @@ def plot_neural_overview(data, fs=30000, duration=10):
     plt.tight_layout()
     return fig
 
+# convert neural file start time to unix timestamp
+neural_start_str = "2025-03-25T9:22:53Z"
+neural_start_unix = pd.to_datetime(neural_start_str).timestamp()
+
+# align behavioral events to neural timeline
+def align_timestamps(behavioral_unix, neural_start_unix, fs):
+    """convert behavioral unix time to neural sample index"""
+    time_offset = behavioral_unix - neural_start_unix  # seconds since neural start
+    sample_index = int(time_offset * fs)
+    return sample_index
+
 def plot_trial_aligned_activity(data, trials, fs=30000, feature='sbp'):
     """Plot neural activity aligned to behavioral events"""
     if len(trials) == 0:
@@ -179,12 +190,10 @@ def plot_trial_aligned_activity(data, trials, fs=30000, feature='sbp'):
     valid_trials = []
     
     for _, trial in trials.iterrows():
-        # Convert timestamp to sample index
-        # If timestamps are in microseconds, convert to seconds then to samples
-        move_sample = int(trial['movement_onset'] * fs / 1e6)
+        move_sample = align_timestamps(trial['movement_onset'], neural_start_unix, fs)
         start_idx = move_sample + window_samples[0]
         end_idx = move_sample + window_samples[1]
-        
+                
         if start_idx >= 0 and end_idx < len(neural_features):
             trial_data = neural_features[start_idx:end_idx]
             aligned_data.append(trial_data)
