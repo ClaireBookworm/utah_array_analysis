@@ -19,13 +19,15 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from neo.io.blackrockio import BlackrockIO
 import datetime
+from analysis import align_timestamps, make_lagged_matrix
 from neo_helpers import load_by_time
 
-# --- PARAMETERS ---
+# --- CONSTANTS ---
 NEURAL_FILE = "data/neural.ns6"
 BEHAVIORAL_FILE = "data/actions.csv"
-DURATION_SEC = 15  # seconds of data to load
-FS = 30000  # Hz, will be overwritten by file
+DURATION_SEC = 15
+FS = 30000
+N_PCA = 10
 
 # --- LOAD DATA ---
 print("Loading neural data...")
@@ -33,25 +35,19 @@ reader = BlackrockIO(NEURAL_FILE, verbose=True)
 fs = float(reader.get_signal_sampling_rate())
 print(f"Sampling rate: {fs} Hz")
 
-# Get neural file start time (from neo proxy)
 block = reader.read_block(lazy=True)
 proxy = block.segments[0].analogsignals[0]
-neural_file_t_start = float(proxy.t_start)  # in seconds
+neural_file_t_start = float(proxy.t_start)
 
-# Load behavioral data
 behavior = pd.read_csv(BEHAVIORAL_FILE)
 print(behavior.head())
-# %%
-# Behavioral timestamps are already in UNIX seconds!
+
 neural_start_unix = datetime.datetime(2025, 3, 25, 21, 22, 53, 360000).timestamp()
 offset_sec = 0
-
-# Use only behavioral events that are within the neural file’s time window
 neural_load_start_unix = behavior['timestamp'].min() + offset_sec
 neural_load_start_time = (neural_load_start_unix - neural_start_unix)
 if neural_load_start_time < 0:
-	neural_load_start_time = 0.0
-     
+    neural_load_start_time = 0.0
 print(f"Loading neural data starting at: {neural_load_start_time:.2f} seconds")
 
 chunk = load_by_time(reader, duration_sec=DURATION_SEC, start_time=neural_load_start_time)
@@ -60,16 +56,6 @@ print(f"Neural data shape: {chunk.shape}")
 behavior['neural_time'] = behavior['timestamp'] - neural_start_unix
 print(f"Added 'neural_time' column to behavior DataFrame. First 5 values:\n{behavior['neural_time'].head()}")
 
-# valid_mask = (neural_load_start_time >= 0) # & (neural_load_start_time < (proxy.t_stop - proxy.t_start))
-# behavior = behavior[valid_mask]
-
-def align_timestamps(behavioral_unix, neural_start_unix=neural_start_unix, fs=fs):
-    """convert behavioral unix time to neural sample index"""
-    time_offset = behavioral_unix - neural_start_unix 
-    sample_index = int(time_offset * fs)
-    return sample_index
-
-# Set start_time for neural chunk
 trials_samples = behavior['timestamp'].apply(lambda x: align_timestamps(x, neural_start_unix, fs))
 behavioral_first_event = trials_samples.min() + int(offset_sec * fs)
 behavioral_end = behavioral_first_event + (DURATION_SEC * fs)
@@ -78,7 +64,6 @@ trials_subset = behavior[valid_mask].copy()
 trials_subset['timestamp'] = trials_samples[valid_mask] - behavioral_first_event
 print(f"First behavioral event (relative to neural): {behavioral_first_event} s")
 
-# %%
 # --- FEATURE EXTRACTION ---
 def extract_spike_band_power(data, fs=30000, freq_band=(200, 400)):
     """Extract high-gamma power (spike band power)"""
@@ -89,53 +74,27 @@ def extract_spike_band_power(data, fs=30000, freq_band=(200, 400)):
     power = np.abs(signal.hilbert(filtered, axis=0))**2
     return gaussian_filter1d(power, sigma=fs//100, axis=0)  # 10ms smoothing
 
-# Neural features: spike band power, then PCA
 print("Extracting neural features (spike band power)...")
 sbp = extract_spike_band_power(chunk, fs)
-
-# Downsample for speed (to 100 Hz)
 ds_factor = int(fs // 100)
 sbp_ds = sbp[::ds_factor]
 print(f"Downsampled neural features shape: {sbp_ds.shape}")
 
-# PCA to reduce neural dimensionality
-n_pca = 10
-pca = PCA(n_components=n_pca)
+pca = PCA(n_components=N_PCA)
 X_neural = pca.fit_transform(StandardScaler().fit_transform(sbp_ds))
 print(f"Neural PCA shape: {X_neural.shape}")
 
-# --- BEHAVIORAL FEATURES ---
 print("Extracting behavioral features...")
-# Interpolate behavioral features to neural timebase
 n_samples = sbp_ds.shape[0]
-time_neural = np.arange(n_samples) * ds_factor / fs  # seconds from neural chunk start
-
-# Interpolate velocity to neural timebase
+time_neural = np.arange(n_samples) * ds_factor / fs
 vel_x = np.interp(time_neural, behavior['neural_time'], behavior['velocity_x'])
 vel_y = np.interp(time_neural, behavior['neural_time'], behavior['velocity_y'])
-
-# Use target as categorical (take most recent target for each time)
 targets = behavior['target_index'].fillna(method='ffill').values if 'target_index' in behavior.columns else behavior['target'].fillna(method='ffill').values
-# Interpolate target index (nearest)
-# target_interp = np.interp(time_neural, behavior['neural_time'], targets, left=targets[0], right=targets[-1])
-
-# # One-hot encode target
-# n_targets = int(np.nanmax(targets)) + 1
-# Y_behavior = np.column_stack([
-#     vel_x,
-#     vel_y,
-#     np.eye(n_targets)[target_interp.astype(int)]
-# ])
-
-target_ordinal = np.interp(time_neural, behavior['neural_time'], behavior['target_index'])
+target_ordinal = np.interp(time_neural, behavior['neural_time'], targets)
 Y_behavior = np.column_stack([vel_x, vel_y, target_ordinal])
 
-main_target = behavior['target_index'].mode()[0]
-target_binary = (behavior['target_index'] == main_target).astype(int)
-target_interp = np.interp(time_neural, behavior['neural_time'], target_binary)
-Y_behavior = np.column_stack([vel_x, vel_y, target_interp])
+velocity_threshold = 0.1
 
-velocity_threshold = 0.1  # m/s, filter out low-velocity samples
 # ^^ the below graph shows 0.1 prob gets rid of the low velocity samples
 # speed = np.sqrt(vel_x**2 + vel_y**2)
 # plt.hist(speed, bins=50, alpha=0.7)
@@ -153,32 +112,16 @@ Y_behavior_move = Y_behavior[movement_mask]
 print(f"Behavioral feature matrix shape: {Y_behavior.shape}")
 print(f"vel_x (first 10): {vel_x[:10]}")
 print(f"vel_y (first 10): {vel_y[:10]}")
-# print(f"target_interp (first 10): {target_interp[:10]}")
 
-# %%
-# --- RUN CCA ---
 n_cca = min(X_neural.shape[1], Y_behavior.shape[1], 10)
 print(f"Running CCA with {n_cca} components...")
 cca = CCA(n_components=n_cca, max_iter=1000)
 X_c, Y_c = cca.fit_transform(X_neural, Y_behavior)
 from numpy import corrcoef
 correlations = [np.corrcoef(X_c[:, i], Y_c[:, i])[0, 1] for i in range(n_cca)]
-n_shuffles = 1000
-shuffle_corrs = []
-for _ in range(n_shuffles):
-    X_shuffle = np.random.permutation(X_neural)  # destroy temporal structure
-    cca_shuffle = CCA(n_components=n_cca)
-    _, Y_c_shuffle = cca_shuffle.fit_transform(X_shuffle, Y_behavior)
-    corr_shuffle = [np.corrcoef(X_shuffle @ cca_shuffle.x_weights_[:, i], 
-                               Y_c_shuffle[:, i])[0,1] for i in range(n_cca)]
-    shuffle_corrs.append(corr_shuffle[0])  # just track first component
-
-p_value = np.mean(np.array(shuffle_corrs) >= correlations[0])
-print(f"p-value vs shuffle: {p_value}")
 
 # --- VISUALIZATION ---
 plt.figure(figsize=(10, 4))
-# plt.plot(cca.score(X_neural, Y_behavior), 'o-', label='Canonical correlation')
 plt.plot(range(n_cca), correlations, 'o-', label='Canonical correlation')
 plt.title('Canonical Correlation (overall score)')
 plt.xlabel('Component')

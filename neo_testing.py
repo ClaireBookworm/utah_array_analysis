@@ -7,6 +7,7 @@ from scipy.signal import butter, filtfilt
 import matplotlib.pyplot as plt
 import pandas as pd
 from neo_helpers import load_by_time, load_by_samples
+from analysis import align_timestamps, make_lagged_matrix
 # %%
 # load reader
 reader = BlackrockIO("data/neural.ns6", verbose=True)

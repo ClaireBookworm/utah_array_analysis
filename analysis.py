@@ -155,11 +155,28 @@ def plot_neural_overview(data, fs=30000, duration=10):
 neural_start_str = "2025-03-25T9:22:53Z"
 neural_start_unix = pd.to_datetime(neural_start_str).timestamp()
 
-# align behavioral events to neural timeline
+def make_lagged_matrix(X, order):
+    """
+    Construct a lagged feature matrix for time series decoding.
+    X: [n_samples, n_features]
+    order: number of lags (int)
+    Returns: [n_samples - order, n_features * order] lagged matrix
+    """
+    if order < 1:
+        raise ValueError("order must be >= 1")
+    return np.hstack([np.roll(X, i, axis=0) for i in range(order)])[order:]
+
+# Standard timestamp alignment function (for all scripts)
 def align_timestamps(behavioral_unix, neural_start_unix, fs):
-    """convert behavioral unix time to neural sample index"""
-    time_offset = behavioral_unix - neural_start_unix  # seconds since neural start
-    sample_index = int(time_offset * fs)
+    """
+    Convert behavioral unix time to neural sample index.
+    behavioral_unix: float or array, unix timestamp(s) of behavioral events
+    neural_start_unix: float, unix timestamp of neural file start
+    fs: float, sampling rate
+    Returns: int or array, sample index/indices
+    """
+    time_offset = behavioral_unix - neural_start_unix
+    sample_index = (time_offset * fs).astype(int) if hasattr(time_offset, '__iter__') else int(time_offset * fs)
     return sample_index
 
 def plot_trial_aligned_activity(data, trials, fs=30000, feature='sbp'):
