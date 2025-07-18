@@ -1,24 +1,17 @@
 # %%
 import os 
-import spikeinterface as si
-import spikeinterface.extractors as se
-import spikeinterface.preprocessing as sp
-import spikeinterface.sorters as ss
-import spikeinterface.postprocessing as spost
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from pathlib import Path
 from neo.io.blackrockio import BlackrockIO
-import quantities as pq
-from scipy.signal import butter, filtfilt
-import matplotlib.pyplot as plt
-import pandas as pd
-from neo_helpers import load_by_time 
+import spikeinterface as si
 from kilosort import run_kilosort
+from neo_helpers import load_by_time 
 
 reader = BlackrockIO("data/neural.ns6", verbose=True)
 fs = float(reader.get_signal_sampling_rate())
 print(f"sampling rate: {fs} Hz")
-# chunk = load_by_time(reader, 10)
 
 trials = pd.read_csv('data/actions.csv')
 trials = trials.rename(columns={
@@ -27,33 +20,6 @@ trials = trials.rename(columns={
     'num_targets': 'target_count',
     'target_index': 'target'	
 })
-
-def preprocess_for_sorting(raw_data, fs, freq_min=300, freq_max=3000):
-    """standard preprocessing pipeline"""
-    # bandpass filter for spikes
-    filtered = sp.bandpass_filter(raw_data, freq_min=freq_min, freq_max=freq_max)
-    # common median referencing to remove artifacts
-    cmr = sp.common_reference(filtered, reference='global', operator='median')
-    # remove bad channels (optional but recommended)
-    # bad_channels = sp.detect_bad_channels(cmr)
-    # clean = cmr.remove_channels(bad_channels)
-    
-    return cmr
-
-# def run_kilosort(recording, output_dir='./kilosort_output'):
-#     """run kilosort2.5 - requires gpu"""
-#     # set kilosort params
-#     params = ss.get_default_sorter_params('kilosort2_5')
-#     params['detect_threshold'] = 6  # lower = more sensitive
-#     params['projection_threshold'] = [10, 4]  # [strong, weak] thresholds
-    
-#     sorting = ss.run_sorter(
-# 		'kilosort2_5',
-#         recording, 
-#         output_folder=output_dir,
-#         **params
-#     )
-#     return sorting
 
 def extract_waveforms(recording, sorting, ms_before=1.0, ms_after=2.0):
     """extract spike waveforms for quality metrics"""
@@ -67,22 +33,6 @@ def extract_waveforms(recording, sorting, ms_before=1.0, ms_after=2.0):
     )
     return we
 
-def compute_quality_metrics(waveforms):
-    """compute standard quality metrics"""
-    # isolation distance, snr, firing rate, etc
-    metrics = spost.compute_quality_metrics(waveforms)
-    return metrics
-def curate_units(waveforms, min_snr=5, max_isi_violation=0.5):
-    """basic automated curation"""
-    metrics = compute_quality_metrics(waveforms)
-    
-    # filter by snr and isi violations
-    good_units = metrics[
-        (metrics['snr'] > min_snr) & 
-        (metrics['isi_violations_rate'] < max_isi_violation)
-    ].index
-    
-    return good_units
 
 def prep_for_ks4(raw_data, fs, output_dir='./ks4_data'):
     """convert to kilosort4 format"""
@@ -110,27 +60,20 @@ def prep_for_ks4(raw_data, fs, output_dir='./ks4_data'):
             xc.append(j * spacing)
             yc.append(i * spacing)
 
-    # create ops dict
-    # dict_keys(['n_chan_bin', 'fs', 'batch_size', 'nblocks', 'Th_universal', 'Th_learned', 'tmin', 'tmax', 'nt', 'shift', 'scale', 'artifact_threshold', 'nskip', 'whitening_range', 'highpass_cutoff', 'binning_depth', 'sig_interp', 'drift_smoothing', 'nt0min', 'dmin', 'dminx', 'min_template_size', 'template_sizes', 'nearest_chans', 'nearest_templates', 'max_channel_distance', 'max_peels', 'templates_from_data', 'n_templates', 'n_pcs', 'Th_single_ch', 'acg_threshold', 'ccg_threshold', 'cluster_neighbors', 'cluster_downsampling', 'max_cluster_subset', 'x_centers', 'duplicate_spike_ms', 'position_limit'])
+    """
+    ops dict DEFAULT SETTINGS options
+    dict_keys(['n_chan_bin', 'fs', 'batch_size', 'nblocks', 'Th_universal', 'Th_learned', 'tmin', 'tmax', 'nt', 'shift', 'scale', 'artifact_threshold', 'nskip', 'whitening_range', 'highpass_cutoff', 'binning_depth', 'sig_interp', 'drift_smoothing', 'nt0min', 'dmin', 'dminx', 'min_template_size', 'template_sizes', 'nearest_chans', 'nearest_templates', 'max_channel_distance', 'max_peels', 'templates_from_data', 'n_templates', 'n_pcs', 'Th_single_ch', 'acg_threshold', 'ccg_threshold', 'cluster_neighbors', 'cluster_downsampling', 'max_cluster_subset', 'x_centers', 'duplicate_spike_ms', 'position_limit'])
+    """
     ops = {
         'fs': fs,
-        # 'n_channels': raw_data.shape[1], 
         'data_dir': output_dir,
         'n_chan_bin': 96,
-        # 'filename': ['data.bin'],  # list of filenames
         'probe_path': 'utah96.prb',
         'Th_single_ch': 3,     # lower single channel threshold
         'Th_universal': 4,     # lower universal threshold  
         'Th_learned': 6,       # learned template threshold
     }
     return ops
-
-print(f"current dir: {os.getcwd()}")
-print(f"ks4_data exists: {os.path.exists('./ks4_data')}")
-print(f"data.bin exists: {os.path.exists('./ks4_data/data.bin')}")
-if os.path.exists('./ks4_data/data.bin'):
-    print(f"file size: {os.path.getsize('./ks4_data/data.bin')} bytes")
-    # print(f"expected size: {chunk2.size * 2} bytes")  # int16 = 2 bytes per sample
 
 chunk2 = load_by_time(reader, 5)
 print("Loaded chunk")
@@ -142,13 +85,11 @@ plt.plot(chunk2[:1000, 0])  # first 1000 samples, channel 0
 plt.title('raw data - should see spikes')
 plt.ylabel('amplitude')
 plt.show()
-# recording = se.NumpyRecording(chunk2.T, fs)  # transpose bc SI wants (n_channels, n_samples)
-# preprocessed = preprocess_for_sorting(recording, fs)
+
 ops = prep_for_ks4(chunk2, fs)
 ops = run_kilosort(ops)
-# print(f"kilosort found {len(ops['unit_ids'])} units")
-# convert results back to spikeinterface
 print(ops)
+
 # dict_keys(['n_chan_bin', 'fs', 'batch_size', 'nblocks', 'Th_universal', 'Th_learned', 'tmin', 'tmax', 'nt', 'shift', 'scale', 'artifact_threshold', 'nskip', 'whitening_range', 'highpass_cutoff', 'binning_depth', 'sig_interp', 'drift_smoothing', 'nt0min', 'dmin', 'dminx', 'min_template_size', 'template_sizes', 'nearest_chans', 'nearest_templates', 'max_channel_distance', 'max_peels', 'templates_from_data', 'n_templates', 'n_pcs', 'Th_single_ch', 'acg_threshold', 'ccg_threshold', 'cluster_neighbors', 'cluster_downsampling', 'max_cluster_subset', 'x_centers', 'duplicate_spike_ms', 'position_limit', 'data_dir', 'probe_path', 'filename', 'settings', 'probe', 'data_dtype', 'do_CAR', 'invert_sign', 'NTbuff', 'Nchan', 'duplicate_spike_bins', 'torch_device', 'save_preprocessed_copy', 'chanMap', 'xc', 'yc', 'kcoords', 'n_chan', 'Nbatches', 'preprocessing', 'Wrot', 'fwav', 'runtime_preproc', 'usage_preproc', 'wPCA', 'wTEMP', 'yup', 'xup', 'ycup', 'xcup', 'iC', 'iC2', 'weigh', 'yblk', 'dshift', 'iKxx', 'runtime_drift', 'usage_drift', 'cuda_drift', 'runtime_st0', 'usage_st0', 'cuda_st0', 'runtime_clu0', 'usage_clu0', 'cuda_clu0', 'iCC', 'iCC_mask', 'iU', 'runtime_st', 'usage_st', 'cuda_st', 'runtime_clu', 'usage_clu', 'cuda_clu', 'runtime_merge', 'usage_merge', 'cuda_merge', 'n_units_total', 'n_units_good', 'n_spikes', 'mean_drift', 'runtime_postproc', 'usage_postproc', 'runtime', 'cuda_postproc'])
 # %%
 data_dir = Path('./ks4_data/kilosort4')
@@ -204,9 +145,6 @@ if 'spike_times' in results and 'spike_clusters' in results:
 else:
     print("no spike data found - kilosort might have failed silently")
 # %%
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
 
 def analyze_spike_sorting_results(spike_times, spike_clusters, templates, raw_data, fs):
     """comprehensive spike sorting analysis plots"""
