@@ -1,38 +1,12 @@
 # %%
 from neo.io.blackrockio import BlackrockIO
+import datetime
 import quantities as pq
 import numpy as np
 from scipy.signal import butter, filtfilt
 import matplotlib.pyplot as plt
 import pandas as pd
-# %%
-def load_by_samples(reader, n_samples=30000):
-    """direct chunk loading by sample count"""
-    raw_chunk = reader.get_analogsignal_chunk(i_stop=n_samples)
-    # rescaling it turns it into voltages
-    return reader.rescale_signal_raw_to_float(raw_chunk, dtype="float64")
-
-def load_by_time(reader, duration_sec=10, start_time=0):
-    """time-based loading using neo blocks"""
-    block = reader.read_block(lazy=True)
-    # block : segments [ analog signals, spike trains ], channel_indexes
-    proxy = block.segments[0].analogsignals[0]
-    # signal starts at 1739738583.3854 s, ends at 1739740084.5254   s
-    if start_time == 0 or start_time is None: 
-        t_start = proxy.t_start
-    else:
-        # start_time is seconds from beginning of recording
-        t_start = proxy.t_start + start_time * pq.s
-    
-    t_end = t_start + duration_sec * pq.s
-    
-    # check bounds
-    if t_end > proxy.t_stop:
-        print(f"warning: requested end time {t_end} exceeds file end {proxy.t_stop}")
-        t_end = proxy.t_stop
-    
-    subset = proxy.time_slice(t_start, t_end)
-    return subset.magnitude
+from neo_helpers import load_by_time, load_by_samples
 # %%
 # load reader
 reader = BlackrockIO("data/neural.ns6", verbose=True)
@@ -137,13 +111,27 @@ plt.show()
 
 ## POWER SPECTRUM 
 from scipy.signal import welch
-freqs, psd = welch(data, fs, nperseg=1024)
-plt.figure(figsize=(10, 4))
-plt.semilogy(freqs, psd)
-plt.title('Power Spectrum Density (PSD)')
-plt.xlabel('Frequency (Hz)')
-plt.ylabel('Power/Frequency (V²/Hz)')
-plt.grid(True)
+
+# Randomly select 8 different channels (from available channels)
+num_channels = chunk2.shape[1]
+np.random.seed(42)
+channels = np.random.choice(num_channels, size=8, replace=False)
+print(f"Randomly selected channels: {channels}")
+
+fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+axes = axes.flatten()
+
+for idx, ch in enumerate(channels):
+    data = chunk2[:, ch].flatten()
+    freqs, psd = welch(data, fs, nperseg=1024)
+    axes[idx].semilogy(freqs, psd)
+    axes[idx].set_title(f'Channel {ch}')
+    axes[idx].set_xlabel('Frequency (Hz)')
+    axes[idx].set_ylabel('PSD (V²/Hz)')
+    axes[idx].grid(True)
+
+plt.suptitle('Power Spectrum Density (PSD) for 8 Random Channels')
+plt.tight_layout()
 plt.show()
 
 # The power spectrum shows how the power of a signal is distributed across different frequencies.
@@ -152,13 +140,16 @@ plt.show()
 
 # %%
 # convert neural file start time to unix timestamp
-neural_start_str = "2025-03-25T9:22:53Z"
-neural_start_unix = pd.to_datetime(neural_start_str).timestamp()
+# neural_start_str = "2025-03-25T9:22:53Z"
+neural_start_unix = datetime.datetime(2025, 3, 25, 21, 22, 53, 360000).timestamp() # pd.to_datetime(neural_start_str).timestamp()
+
+print("Difference behavioral start - neural start:", str(trials['movement_onset'].min() - neural_start_unix))
 
 # align behavioral events to neural timeline
 def align_timestamps(behavioral_unix, neural_start_unix, fs):
     """convert behavioral unix time to neural sample index"""
     time_offset = behavioral_unix - neural_start_unix  # seconds since neural start
+    # earliest behavioral event occurs 25.19 seconds before neural recordings time_origin
     sample_index = int(time_offset * fs)
     return sample_index
 
@@ -249,27 +240,262 @@ def plot_aligned_trials(data, trials, fs=30000, feature='sbp'):
     return fig, aligned_array, valid_trials_df
 # %%
 import analysis
-duration = 8
-trials_samples = trials['movement_onset'].apply(lambda x: align_timestamps(x, neural_start_unix, fs))
+def get_trials_chunk(trials, neural_start_unix, reader, fs, duration=5, offset_sec=15):
+    """
+    Extract a chunk of neural data and corresponding trials within a time window.
+    Args:
+        trials (pd.DataFrame): Behavioral trials dataframe.
+        neural_start_unix (float): Neural file start time (unix timestamp).
+        reader (BlackrockIO): Neo reader object.
+        fs (float): Sampling rate.
+        duration (float): Duration of chunk in seconds.
+        offset_sec (float): Offset from first movement onset in seconds.
+    Returns:
+        chunk_from_trials (np.ndarray): Neural data chunk.
+        trials_subset (pd.DataFrame): Trials within chunk, movement_onset as sample index relative to chunk.
+    """
+    trials_samples = trials['movement_onset'].apply(lambda x: align_timestamps(x, neural_start_unix, fs))
+    # units are all in seconds! 
+    neural_load_start_unix = trials['movement_onset'].min() + offset_sec
+    neural_load_start_time = (neural_load_start_unix - neural_start_unix) 
+    print(f"Loading neural data starting at: {neural_load_start_time:.2f} seconds")
+    
+    if neural_load_start_time < 0:
+        print(f"Warning: Calculated neural_load_start_time is negative ({neural_load_start_time:.2f}s). "
+              "Adjusting to 0s (start of neural recording) as data prior to time_origin is typically unavailable in NS6 files.")
+        neural_load_start_time = 0.0 # Cap the start time at the beginning of the recording
 
-trial_start_sample = trials['movement_onset'].min()
-trial_start_time = (trial_start_sample - neural_start_unix) / fs
-print(f"Trial start time: {trial_start_time:.2f} seconds")
-chunk_from_trials = load_by_time(reader, duration_sec=duration, start_time=trial_start_time)
+    chunk_from_trials = load_by_time(reader, duration_sec=duration, start_time=neural_load_start_time)
 
-trial_start_sample = trials_samples.min()
-chunk_end_sample = trial_start_sample + (duration * fs)
-valid_mask = (trials_samples >= trial_start_sample) & (trials_samples < chunk_end_sample)
-trials_subset = trials[valid_mask].copy()
-trials_subset['movement_onset'] = trials_samples[valid_mask] - trial_start_sample # adjust to chunk-relative sample indices
-print(f"trials in {duration} sec chunk: {len(trials_subset)}")
-print(f"trial spacing: {np.diff(trials_subset['movement_onset'].head(5))} samples")
+    sample_offset = int(offset_sec * fs)
+    trial_filter_start = trials_samples.min() + sample_offset # adding the sample index offset
+    trial_filter_end = trial_filter_start + (duration * fs)
+    valid_mask = (trials_samples >= trial_filter_start) & (trials_samples < trial_filter_end)
+    trials_subset = trials[valid_mask].copy()
+    trials_subset['movement_onset'] = trials_samples[valid_mask] - trial_filter_start
+    print(f"trials in {duration} sec chunk: {len(trials_subset)}")
+    print(f"trial spacing: {np.diff(trials_subset['movement_onset'].head(5))} samples")
+
+    return chunk_from_trials, trials_subset
 # %%
-# then call it
-fig, aligned_data, valid_trials = plot_aligned_trials(
-    data=chunk_from_trials,
-    trials=trials_subset,
-    fs=30000,
-    feature='sbp'
-)
+offsets = [0, 45.76, 85.4, 118.46, 134.79]
+aligned_concat = []
+for offset in offsets:
+    print(f"Loading chunk with offset {offset} seconds")
+    chunk_from_trials, trials_subset = get_trials_chunk(trials=trials, neural_start_unix=neural_start_unix, reader=reader, fs=fs, duration=5, offset_sec=offset)
+    
+    fig, aligned_data, valid_trials = plot_aligned_trials(
+        data=chunk_from_trials,
+        trials=trials_subset,
+        fs=30000,
+        feature='sbp'
+    )
+    plt.show()
+    if aligned_data is not None:
+        aligned_concat.append(aligned_data)
+
+if aligned_concat:
+    # Concatenate along first axis (trials), ensure shape [x, y, 96]
+    aligned_concat = np.concatenate(aligned_concat, axis=0)
+    print(f"Concatenated shape: {aligned_concat.shape}")
+else:
+    aligned_concat = np.empty((0, 0, 96))
+    print("No aligned data found.")
+    chunk_from_trials, trials_subset = get_trials_chunk(trials=trials, neural_start_unix=neural_start_unix, reader=reader, fs=fs, duration=5, offset_sec=offset)
+    
+    fig, aligned_data, valid_trials = plot_aligned_trials(
+        data=chunk_from_trials,
+        trials=trials_subset,
+        fs=30000,
+        feature='sbp'
+    )
+    plt.show()
+
+# %%
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.stats import sem # For Standard Error of the Mean
+
+# --- Assuming 'aligned_concat' is already populated from your loop ---
+# Its shape is (192, 120000, 96) as confirmed
+
+if aligned_concat.shape[0] > 0: # Proceed only if there's data after concatenation
+
+    # --- NEW: Average SBP across the 96 channels ---
+    # This assumes that 'aligned_concat' already contains the SBP values per channel.
+    # The result will be a 2D array: (total_trials, num_timepoints)
+    aligned_concat_sbp_averaged_across_channels = np.mean(aligned_concat, axis=2)
+    
+    print(f"Original aligned_concat shape: {aligned_concat.shape}")
+    print(f"Shape after averaging SBP across channels: {aligned_concat_sbp_averaged_across_channels.shape}")
+    # --- END NEW ---
+
+    # Now calculate mean and standard error across trials
+    # The axis=0 here means averaging across the trials dimension
+    mean_sbp = np.mean(aligned_concat_sbp_averaged_across_channels, axis=0)
+    sem_sbp = sem(aligned_concat_sbp_averaged_across_channels, axis=0)
+
+    # Determine the time vector for the x-axis
+    # Based on your previous plot example, the time axis goes from -1s to 3s.
+    # The number of time points is the second dimension of the channel-averaged data.
+    num_timepoints = aligned_concat_sbp_averaged_across_channels.shape[1]
+    time_vector = np.linspace(-1, 3, num_timepoints) # Adjust these bounds if your actual aligned window differs
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(time_vector, mean_sbp, label='Mean SBP')
+    plt.fill_between(time_vector, mean_sbp - sem_sbp, mean_sbp + sem_sbp, alpha=0.2, label='SEM')
+
+    # Add a vertical line at the alignment point (movement onset, typically 0s)
+    plt.axvline(x=0, color='red', linestyle='--', label='Movement Onset')
+
+    plt.xlabel('Time from Movement Onset (s)')
+    plt.ylabel('Mean SBP (across channels)') # Updated label to reflect averaging
+    plt.title(f'Trial-Aligned Mean SBP (All Trials, N={aligned_concat_sbp_averaged_across_channels.shape[0]})')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("No data in aligned_concat to plot.")
+# %%
+def get_target_transition_times(
+    trials_df: pd.DataFrame,
+    time_col: str = 'movement_onset',
+    target_col: str = 'target',
+    verbose: bool = True # Changed default to True for your immediate need
+) -> np.ndarray:
+    """
+    Identifies Unix timestamps where the target index changes and optionally prints details.
+
+    Args:
+        trials_df (pd.DataFrame): Behavioral DataFrame.
+        time_col (str): Name of the timestamp column (e.g., 'movement_onset').
+        target_col (str): Name of the target index column (e.g., 'target').
+        verbose (bool): If True, prints details of each target transition.
+
+    Returns:
+        np.ndarray: Sorted Unix timestamps where the 'target_index' changes.
+                    Includes the timestamp of the very first trial.
+    """
+    if time_col not in trials_df.columns:
+        raise ValueError(f"Column '{time_col}' not found in behavioral DataFrame.")
+    if target_col not in trials_df.columns:
+        raise ValueError(f"Column '{target_col}' not found in behavioral DataFrame.")
+
+    trials_sorted = trials_df.sort_values(by=time_col).reset_index(drop=True)
+
+    # Get the target of the previous trial for comparison
+    previous_target_series = trials_sorted[target_col].shift(1)
+    
+    # Create a mask for rows where the target *changes* from the previous one
+    target_changes_mask = (trials_sorted[target_col] != previous_target_series)
+
+    # Extract the timestamps at these change points
+    transition_timestamps = trials_sorted[time_col][target_changes_mask].values
+
+    if verbose:
+        print("\n--- Target Transition Details ---")
+        # Filter the DataFrame to show only the rows where a change occurred
+        change_rows = trials_sorted[target_changes_mask].copy() # Use .copy() to avoid SettingWithCopyWarning
+        
+        # Add the 'old_target' column for clear "from X to Y" printing
+        change_rows['old_target'] = previous_target_series[target_changes_mask]
+        
+        for idx, row in change_rows.iterrows():
+            old_t = row['old_target']
+            new_t = row[target_col]
+            timestamp = row[time_col]
+            
+            # For the very first trial, 'old_target' will be NaN (no previous trial)
+            if pd.isna(old_t):
+                print(f"At Unix {timestamp - neural_start_unix}: First trial, target set to {int(new_t)}")
+            else:
+                print(f"At Unix {timestamp - neural_start_unix}: Target changed from {int(old_t)} to {int(new_t)}")
+        print("-------------------------------\n")
+
+    return transition_timestamps
+# --- How to use it with your renamed DataFrame ---
+target_change_unix_times = get_target_transition_times(trials)
+print(f"Identified {len(target_change_unix_times)} target transition timestamps.")
+# Convert transition timestamps to seconds (assuming they are in sample indices or unix time)
+# If they are unix timestamps, subtract neural_start_unix to get seconds relative to neural recording
+transition_times_sec = (target_change_unix_times - neural_start_unix)
+print("Transition times (seconds relative to neural start):", transition_times_sec[:5])
+print(f"First 5 transition times: {target_change_unix_times[:5]}")
+# %%
+from analysis import load_neural_chunk, align_behavioral_trials, plot_neural_overview, plot_trial_aligned_activity, plot_population_dynamics, decode_movement_direction, plot_utah_array_map
+def run_analysis(neural_file = "data/neural.ns6", behavioral_file="data/actions.csv"):
+    """Complete analysis pipeline"""
+    print("Loading data...")
+    neural_chunk = load_neural_chunk(neural_file, n_samples=300000)  # 10 seconds
+    behavioral_df = pd.read_csv(behavioral_file)
+    trials = align_behavioral_trials(behavioral_df)
+    
+    print(f"Loaded {neural_chunk.shape} neural data, {len(trials)} trials")
+    
+    # Basic neural overview
+    print("Plotting neural overview...")
+    fig1 = plot_neural_overview(neural_chunk)
+
+    # Trial-aligned activity
+    print("Analyzing trial-aligned activity...")
+    result = plot_trial_aligned_activity(neural_chunk, trials, feature='sbp')
+
+    if result is not None:
+        fig2, aligned_data, valid_trials = result
+        
+        # Population dynamics
+        print("Computing population dynamics...")
+        fig3, pca = plot_population_dynamics(aligned_data, valid_trials)
+        
+        # Decoding
+        print("Testing movement direction decoding...")
+        scores, decoder = decode_movement_direction(
+            aligned_data, valid_trials['target'].values
+        )
+        
+        # Utah array visualization
+        print("Creating Utah array visualization...")
+        channel_activity = np.mean(np.mean(aligned_data, axis=0), axis=0)
+        fig4 = plot_utah_array_map(channel_activity)
+        
+        return {
+            'neural_data': neural_chunk,
+            'trials': trials,
+            'aligned_data': aligned_data,
+            'decoder_scores': scores,
+            'figures': [fig1, fig2, fig3, fig4]
+        }
+    else:
+        # Just show basic plots if alignment fails
+        print("Trial alignment failed, showing basic neural overview only")
+        
+        # Show some trial timing info
+        if len(trials) > 0:
+            plt.figure(figsize=(12, 4))
+            plt.subplot(1, 2, 1)
+            plt.hist(trials['target'], bins=8, alpha=0.7)
+            plt.xlabel('Target Index')
+            plt.ylabel('Count')
+            plt.title('Trial Distribution by Target')
+            
+            plt.subplot(1, 2, 2)
+            plt.plot(trials['trial_start'], 'o-', alpha=0.7)
+            plt.xlabel('Trial Number')
+            plt.ylabel('Trial Start Timestamp')
+            plt.title('Trial Timing')
+            plt.tight_layout()
+            fig_trials = plt.gcf()
+            
+            return {
+                'neural_data': neural_chunk,
+                'trials': trials,
+                'figures': [fig1, fig_trials]
+            }
+        
+        return {'neural_data': neural_chunk, 'trials': trials, 'figures': [fig1]}
+# %%
+# Usage
+results = run_analysis()
+plt.show()
 # %%

@@ -75,7 +75,7 @@ def prep_for_ks4(raw_data, fs, output_dir='./ks4_data'):
     }
     return ops
 
-chunk2 = load_by_time(reader, 5)
+chunk2 = load_by_time(reader, 20)
 print("Loaded chunk")
 print(f"data range: {chunk2.min():.3f} to {chunk2.max():.3f}")
 print(f"data std: {chunk2.std():.3f}")
@@ -105,45 +105,8 @@ for fname in results_files:
     else:
         print(f"missing: {fname}")
 
-# if we have spike data, visualize it
-if 'spike_times' in results and 'spike_clusters' in results:
-    spike_times = results['spike_times']
-    spike_clusters = results['spike_clusters']
-    
-    print(f"\ntotal spikes: {len(spike_times)}")
-    print(f"unique units: {len(np.unique(spike_clusters))}")
-    print(f"time range: {spike_times.min()/fs:.2f} to {spike_times.max()/fs:.2f} seconds")
-    
-    # plot raster
-    unit_ids = np.unique(spike_clusters)
-    plt.figure(figsize=(12, 8))
-    
-    for i, unit in enumerate(unit_ids[:20]):  # first 20 units
-        unit_spikes = spike_times[spike_clusters == unit] / fs
-        plt.scatter(unit_spikes, [unit] * len(unit_spikes), s=1, alpha=0.8)
-    
-    plt.ylabel('unit id')
-    plt.xlabel('time (s)')
-    plt.title(f'raster plot: {len(unit_ids)} units, {len(spike_times)} total spikes')
-    plt.grid(True, alpha=0.3)
-    plt.show()
-    
-    # firing rate histogram
-    firing_rates = []
-    for unit in unit_ids:
-        n_spikes = np.sum(spike_clusters == unit)
-        rate = n_spikes / (chunk2.shape[0] / fs)  # spikes per second
-        firing_rates.append(rate)
-    
-    plt.figure(figsize=(10, 4))
-    plt.hist(firing_rates, bins=20, alpha=0.7)
-    plt.xlabel('firing rate (Hz)')
-    plt.ylabel('number of units')
-    plt.title(f'firing rate distribution (mean: {np.mean(firing_rates):.2f} Hz)')
-    plt.show()
+# %%
 
-else:
-    print("no spike data found - kilosort might have failed silently")
 # %%
 
 def analyze_spike_sorting_results(spike_times, spike_clusters, templates, raw_data, fs):
@@ -329,6 +292,81 @@ analyze_spike_sorting_results(
     results.get('spike_clusters', np.array([])),
     results.get('templates', np.array([])),
     chunk2,
+    fs
+)
+# %%
+
+chunk3 = load_by_time(reader, 40, start_time=40)
+print("Loaded chunk")
+print(f"data range: {chunk3.min():.3f} to {chunk3.max():.3f}")
+print(f"data std: {chunk3.std():.3f}")
+
+plt.figure(figsize=(10, 4))
+plt.plot(chunk3[:5000, 0])  # first 1000 samples, channel 0
+plt.title('raw data - should see spikes')
+plt.ylabel('amplitude')
+plt.show()
+
+ops = prep_for_ks4(chunk3, fs, output_dir='./ks4_data2')
+ops = run_kilosort(ops)
+print(ops)
+
+# %%
+data_dir = Path('./ks4_data2/kilosort4')
+# try to find results in data_dir instead
+results_files = ['spike_times.npy', 'spike_clusters.npy', 'templates.npy', 'amplitudes.npy']
+results = {}
+
+for fname in results_files:
+    fpath = os.path.join(data_dir, fname)
+    if os.path.exists(fpath):
+        results[fname.split('.')[0]] = np.load(fpath)
+        print(f"loaded {fname}: shape {results[fname.split('.')[0]].shape}")
+    else:
+        print(f"missing: {fname}")
+
+analyze_spike_sorting_results(
+    results.get('spike_times', np.array([])),
+    results.get('spike_clusters', np.array([])),
+    results.get('templates', np.array([])),
+    chunk3,
+    fs
+)
+# %%
+chunk3 = load_by_time(reader, 60, start_time=10)
+print("Loaded chunk")
+print(f"data range: {chunk3.min():.3f} to {chunk3.max():.3f}")
+print(f"data std: {chunk3.std():.3f}")
+
+plt.figure(figsize=(10, 4))
+plt.plot(chunk3[:5000, 0])  # first 1000 samples, channel 0
+plt.title('raw data - should see spikes')
+plt.ylabel('amplitude')
+plt.show()
+
+ops = prep_for_ks4(chunk3, fs, output_dir='./ks4_data3')
+ops = run_kilosort(ops)
+print(ops)
+
+# %%
+data_dir = Path('./ks4_data3/kilosort4')
+# try to find results in data_dir instead
+results_files = ['spike_times.npy', 'spike_clusters.npy', 'templates.npy', 'amplitudes.npy']
+results = {}
+
+for fname in results_files:
+    fpath = os.path.join(data_dir, fname)
+    if os.path.exists(fpath):
+        results[fname.split('.')[0]] = np.load(fpath)
+        print(f"loaded {fname}: shape {results[fname.split('.')[0]].shape}")
+    else:
+        print(f"missing: {fname}")
+
+analyze_spike_sorting_results(
+    results.get('spike_times', np.array([])),
+    results.get('spike_clusters', np.array([])),
+    results.get('templates', np.array([])),
+    chunk3,
     fs
 )
 # %%
